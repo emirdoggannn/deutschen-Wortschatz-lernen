@@ -48,16 +48,75 @@
   
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow-x: hidden; }
-    button { cursor: pointer; transition: all 0.2s ease; }
-    button:active { transform: scale(0.98); }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow-x: hidden; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    button { cursor: pointer; transition: transform 0.15s ease, background 0.15s ease; will-change: transform; }
+    button:active { transform: scale(0.97); }
     select { cursor: pointer; }
+    
+    /* Performans optimizasyonları */
+    .scroll-container { 
+      overflow-y: auto; 
+      -webkit-overflow-scrolling: touch; 
+      overscroll-behavior: contain;
+      will-change: scroll-position;
+    }
+    .card-item { 
+      contain: layout style paint;
+      will-change: transform;
+    }
+    .animate-in { 
+      animation: fadeIn 0.2s ease-out; 
+      will-change: opacity, transform;
+    }
+    @keyframes fadeIn { 
+      from { opacity: 0; transform: translateY(8px); } 
+      to { opacity: 1; transform: translateY(0); } 
+    }
+    
+    /* GPU hızlandırma */
+    .gpu-accelerate { transform: translateZ(0); backface-visibility: hidden; }
+    
+    /* Touch optimizasyonu */
+    .touch-action { touch-action: manipulation; }
+    
+    /* Scroll bar stili */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(129, 140, 248, 0.3); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(129, 140, 248, 0.5); }
+    
+    /* Input focus optimizasyonu */
+    input:focus { outline: none; }
+    input { font-size: 16px !important; } /* iOS zoom engellemek için */
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef, memo, useTransition } = React;
+
+// ==================== PERFORMANS YARDIMCILARI ====================
+// Debounce hook - arama gibi sık tetiklenen işlemler için
+const useDebounce = (value, delay = 300) => {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  useEffect(() => {
+    const handler = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(handler);
+  }, [value, delay]);
+  return debouncedValue;
+};
+
+// Throttle fonksiyonu - scroll gibi sık tetiklenen eventler için
+const throttle = (func, limit = 100) => {
+  let inThrottle;
+  return function(...args) {
+    if (!inThrottle) {
+      func.apply(this, args);
+      inThrottle = true;
+      setTimeout(() => inThrottle = false, limit);
+    }
+  };
+};
 
 // ==================== ALMANCA ÖĞRENME UYGULAMASI ====================
 // Ana Sayfa + Artikel Quiz + Fiil Quiz - TÜM ÖZELLİKLER
@@ -3625,75 +3684,130 @@ function FiilQuiz({ onBack, currentTheme, cycleTheme, recordResult }) {
 // ==================== SÖZLÜK ====================
 function Sozluk({ onBack, currentTheme, cycleTheme, favorites, favoriteVerbs, toggleFavorite, toggleFavoriteVerb }) {
   const theme = themes[currentTheme];
-  const [activeTab, setActiveTab] = useState('isimler'); // 'isimler', 'fiiller' veya 'favoriler'
+  const [activeTab, setActiveTab] = useState('isimler');
   const [searchTerm, setSearchTerm] = useState('');
   const [articleFilter, setArticleFilter] = useState('all');
   const [levelFilter, setLevelFilter] = useState('all');
-  const [lessonFilter, setLessonFilter] = useState('all');
-  const [favSubTab, setFavSubTab] = useState('isimler'); // Favoriler içinde alt tab
+  const [selectedLessons, setSelectedLessons] = useState(new Set());
+  const [favSubTab, setFavSubTab] = useState('isimler');
+  const [visibleCount, setVisibleCount] = useState(50);
+  
+  // Debounced arama - performans için
+  const debouncedSearch = useDebounce(searchTerm, 200);
 
-  // Favori kontrolü
-  const isFavorite = (noun) => favorites.some(f => f.noun === noun);
-  const isFavoriteVerb = (verb) => favoriteVerbs.some(f => f.verb === verb);
+  // Memoized favori kontrolleri
+  const isFavorite = useCallback((noun) => favorites.some(f => f.noun === noun), [favorites]);
+  const isFavoriteVerb = useCallback((verb) => favoriteVerbs.some(f => f.verb === verb), [favoriteVerbs]);
 
-  // Tüm isimleri hazırla
   const allNouns = useMemo(() => {
     const nouns = [];
     Object.entries(germanNounsData).forEach(([article, words]) => {
-      words.forEach(word => {
-        nouns.push({ ...word, article });
-      });
+      words.forEach(word => nouns.push({ ...word, article }));
     });
     return nouns.sort((a, b) => a.noun.localeCompare(b.noun));
   }, []);
 
-  // Tüm fiilleri hazırla
   const allVerbs = useMemo(() => {
     const verbs = [];
     Object.entries(germanVerbsData).forEach(([lesson, verbList]) => {
-      verbList.forEach(verb => {
-        verbs.push({ ...verb, lesson: lesson.replace('_', ' ') });
-      });
+      verbList.forEach(verb => verbs.push({ ...verb, lesson: lesson.replace('_', ' ') }));
     });
     return verbs.sort((a, b) => a.verb.localeCompare(b.verb));
   }, []);
 
-  // Ders listesi
   const lessons = useMemo(() => {
     const lessonSet = new Set();
     allNouns.forEach(n => lessonSet.add(n.lesson));
-    return Array.from(lessonSet).sort((a, b) => {
-      const numA = parseInt(a.replace('Lektion ', ''));
-      const numB = parseInt(b.replace('Lektion ', ''));
-      return numA - numB;
-    });
+    return Array.from(lessonSet).sort((a, b) => parseInt(a.replace('Lektion ', '')) - parseInt(b.replace('Lektion ', '')));
   }, [allNouns]);
 
-  // Filtrelenmiş isimler
+  const verbLessons = useMemo(() => {
+    const lessonSet = new Set();
+    allVerbs.forEach(v => lessonSet.add(v.lesson));
+    return Array.from(lessonSet).sort((a, b) => parseInt(a.replace('Lektion ', '')) - parseInt(b.replace('Lektion ', '')));
+  }, [allVerbs]);
+
+  // Çoklu ders seçimi toggle
+  const toggleLesson = useCallback((lesson) => {
+    setSelectedLessons(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(lesson)) newSet.delete(lesson);
+      else newSet.add(lesson);
+      return newSet;
+    });
+    setVisibleCount(50);
+  }, []);
+
+  // Tümünü seç/bırak
+  const selectAllLessons = useCallback(() => {
+    const currentLessons = activeTab === 'isimler' ? lessons : verbLessons;
+    const availableLessons = currentLessons.filter(l => {
+      const num = parseInt(l.replace('Lektion ', ''));
+      if (levelFilter === 'A1') return num <= 9;
+      if (levelFilter === 'A2') return num >= 10 && num <= 18;
+      if (levelFilter === 'B1') return num >= 19;
+      return true;
+    });
+    
+    const allSelected = availableLessons.every(l => selectedLessons.has(l));
+    if (allSelected) {
+      setSelectedLessons(new Set());
+    } else {
+      setSelectedLessons(new Set(availableLessons));
+    }
+    setVisibleCount(50);
+  }, [activeTab, lessons, verbLessons, levelFilter, selectedLessons]);
+
+  // Mevcut derslerin seçili olup olmadığı
+  const allLessonsSelected = useMemo(() => {
+    const currentLessons = activeTab === 'isimler' ? lessons : verbLessons;
+    const availableLessons = currentLessons.filter(l => {
+      const num = parseInt(l.replace('Lektion ', ''));
+      if (levelFilter === 'A1') return num <= 9;
+      if (levelFilter === 'A2') return num >= 10 && num <= 18;
+      if (levelFilter === 'B1') return num >= 19;
+      return true;
+    });
+    return availableLessons.length > 0 && availableLessons.every(l => selectedLessons.has(l));
+  }, [selectedLessons, lessons, verbLessons, levelFilter, activeTab]);
+
+  // Filtrelenmiş isimler - debounced search ile
   const filteredNouns = useMemo(() => {
+    const search = debouncedSearch.toLowerCase();
     return allNouns.filter(noun => {
-      const matchesSearch = searchTerm === '' || 
-        noun.noun.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        noun.translation.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesSearch = search === '' || 
+        noun.noun.toLowerCase().includes(search) ||
+        noun.translation.toLowerCase().includes(search);
       const matchesArticle = articleFilter === 'all' || noun.article === articleFilter;
       const matchesLevel = levelFilter === 'all' || noun.level === levelFilter;
-      const matchesLesson = lessonFilter === 'all' || noun.lesson === lessonFilter;
+      const matchesLesson = selectedLessons.size === 0 || selectedLessons.has(noun.lesson);
       return matchesSearch && matchesArticle && matchesLevel && matchesLesson;
     });
-  }, [allNouns, searchTerm, articleFilter, levelFilter, lessonFilter]);
+  }, [allNouns, debouncedSearch, articleFilter, levelFilter, selectedLessons]);
 
-  // Filtrelenmiş fiiller
+  // Filtrelenmiş fiiller - debounced search ile
   const filteredVerbs = useMemo(() => {
+    const search = debouncedSearch.toLowerCase();
     return allVerbs.filter(verb => {
-      const matchesSearch = searchTerm === '' || 
-        verb.verb.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        verb.tr[0].toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesLesson = lessonFilter === 'all' || verb.lesson === lessonFilter;
-      return matchesSearch && matchesLesson;
+      const matchesSearch = search === '' || 
+        verb.verb.toLowerCase().includes(search) ||
+        verb.tr[0].toLowerCase().includes(search);
+      const matchesLesson = selectedLessons.size === 0 || selectedLessons.has(verb.lesson);
+      const num = parseInt(verb.lesson.replace('Lektion ', ''));
+      const matchesLevel = levelFilter === 'all' || 
+        (levelFilter === 'A1' && num <= 9) ||
+        (levelFilter === 'A2' && num >= 10 && num <= 18) ||
+        (levelFilter === 'B1' && num >= 19);
+      return matchesSearch && matchesLesson && matchesLevel;
     });
-  }, [allVerbs, searchTerm, lessonFilter]);
+  }, [allVerbs, debouncedSearch, selectedLessons, levelFilter]);
 
-  const speakWord = (word) => {
+  // Görünür isimler (pagination)
+  const visibleNouns = useMemo(() => filteredNouns.slice(0, visibleCount), [filteredNouns, visibleCount]);
+  const visibleVerbs = useMemo(() => filteredVerbs.slice(0, visibleCount), [filteredVerbs, visibleCount]);
+
+  // Memoized speak fonksiyonu
+  const speakWord = useCallback((word) => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(word);
@@ -3701,15 +3815,53 @@ function Sozluk({ onBack, currentTheme, cycleTheme, favorites, favoriteVerbs, to
       utterance.rate = 0.8;
       window.speechSynthesis.speak(utterance);
     }
-  };
+  }, []);
 
-  const stats = {
+  const loadMore = useCallback(() => setVisibleCount(prev => prev + 50), []);
+
+  // Tab değiştiğinde resetle
+  useEffect(() => {
+    setVisibleCount(50);
+    setSearchTerm('');
+  }, [activeTab]);
+
+  // Seviye değiştiğinde seçimleri temizle
+  useEffect(() => {
+    setSelectedLessons(new Set());
+    setVisibleCount(50);
+  }, [levelFilter]);
+
+  const stats = useMemo(() => ({
     totalNouns: allNouns.length,
     der: allNouns.filter(n => n.article === 'DER').length,
     die: allNouns.filter(n => n.article === 'DIE').length,
     das: allNouns.filter(n => n.article === 'DAS').length,
     totalVerbs: allVerbs.length
-  };
+  }), [allNouns, allVerbs]);
+
+  // Ders butonları için renk hesaplama - memoized
+  const getLessonStyle = useCallback((lesson, isSelected) => {
+    const num = parseInt(lesson.replace('Lektion ', ''));
+    const isA1 = num <= 9;
+    const isA2 = num >= 10 && num <= 18;
+    const levelColor = isA1 ? '#22c55e' : isA2 ? '#3b82f6' : '#a855f7';
+    
+    return {
+      padding: '6px 10px', 
+      borderRadius: '12px', 
+      cursor: 'pointer',
+      fontSize: '0.7rem', 
+      fontWeight: 700, 
+      whiteSpace: 'nowrap',
+      background: isSelected ? levelColor : `${levelColor}20`,
+      color: isSelected ? '#fff' : levelColor,
+      border: `2px solid ${levelColor}`,
+      transition: 'transform 0.15s ease, background 0.15s ease',
+      flexShrink: 0,
+      minWidth: '36px',
+      textAlign: 'center'
+    };
+  }, []);
 
   return (
     <div style={{ minHeight: '100vh', background: theme.bg, padding: '12px', fontFamily: "'Inter', sans-serif" }}>
@@ -3729,59 +3881,40 @@ function Sozluk({ onBack, currentTheme, cycleTheme, favorites, favoriteVerbs, to
 
         {/* Tab Seçimi */}
         <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
-          <button 
-            onClick={() => { setActiveTab('isimler'); setSearchTerm(''); }}
-            style={{ 
-              flex: 1, padding: '10px 8px', borderRadius: '12px', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem',
-              background: activeTab === 'isimler' ? '#10b981' : theme.card,
-              color: activeTab === 'isimler' ? '#fff' : theme.text,
-              border: activeTab === 'isimler' ? 'none' : `1px solid ${theme.cardBorder}`
-            }}
-          >
-            📝 İsimler ({stats.totalNouns})
-          </button>
-          <button 
-            onClick={() => { setActiveTab('fiiller'); setSearchTerm(''); }}
-            style={{ 
-              flex: 1, padding: '10px 8px', borderRadius: '12px', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem',
-              background: activeTab === 'fiiller' ? '#a855f7' : theme.card,
-              color: activeTab === 'fiiller' ? '#fff' : theme.text,
-              border: activeTab === 'fiiller' ? 'none' : `1px solid ${theme.cardBorder}`
-            }}
-          >
-            🔤 Fiiller ({stats.totalVerbs})
-          </button>
-          <button 
-            onClick={() => { setActiveTab('favoriler'); setSearchTerm(''); }}
-            style={{ 
-              flex: 1, padding: '10px 8px', borderRadius: '12px', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem',
-              background: activeTab === 'favoriler' ? '#f59e0b' : theme.card,
-              color: activeTab === 'favoriler' ? '#fff' : theme.text,
-              border: activeTab === 'favoriler' ? 'none' : `1px solid ${theme.cardBorder}`
-            }}
-          >
-            ⭐ Favoriler ({favorites.length + favoriteVerbs.length})
-          </button>
+          {[
+            { key: 'isimler', label: '📝 İsimler', count: stats.totalNouns, color: '#10b981' },
+            { key: 'fiiller', label: '🔤 Fiiller', count: stats.totalVerbs, color: '#a855f7' },
+            { key: 'favoriler', label: '⭐ Favoriler', count: favorites.length + favoriteVerbs.length, color: '#f59e0b' }
+          ].map(tab => (
+            <button key={tab.key}
+              onClick={() => { setActiveTab(tab.key); setSelectedLessons(new Set()); setLevelFilter('all'); }}
+              style={{ 
+                flex: 1, padding: '10px 8px', borderRadius: '12px', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem',
+                background: activeTab === tab.key ? tab.color : theme.card,
+                color: activeTab === tab.key ? '#fff' : theme.text,
+                border: activeTab === tab.key ? 'none' : `1px solid ${theme.cardBorder}`
+              }}
+            >
+              {tab.label} ({tab.count})
+            </button>
+          ))}
         </div>
 
         {/* Arama */}
-        <div style={{ marginBottom: '12px' }}>
-          <input
-            type="text"
-            placeholder={activeTab === 'isimler' ? "İsim veya çeviri ara..." : activeTab === 'fiiller' ? "Fiil veya çeviri ara..." : "Favorilerde ara..."}
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            style={{
-              width: '100%', padding: '12px 16px', borderRadius: '12px',
-              background: theme.card, color: theme.text,
-              border: `1px solid ${theme.cardBorder}`,
-              fontSize: '0.9rem', outline: 'none',
-              boxSizing: 'border-box'
-            }}
-          />
-        </div>
+        <input
+          type="text"
+          placeholder={activeTab === 'isimler' ? "İsim veya çeviri ara..." : activeTab === 'fiiller' ? "Fiil veya çeviri ara..." : "Favorilerde ara..."}
+          value={searchTerm}
+          onChange={(e) => { setSearchTerm(e.target.value); setVisibleCount(50); }}
+          style={{
+            width: '100%', padding: '12px 16px', borderRadius: '12px', marginBottom: '12px',
+            background: theme.card, color: theme.text,
+            border: `1px solid ${theme.cardBorder}`,
+            fontSize: '0.9rem', outline: 'none', boxSizing: 'border-box'
+          }}
+        />
 
-        {/* Filtreler - Sadece İsimler için */}
+        {/* Filtreler - İsimler */}
         {activeTab === 'isimler' && (
           <div style={{ marginBottom: '12px', padding: '12px', background: theme.card, borderRadius: '12px', border: `1px solid ${theme.cardBorder}` }}>
             {/* Artikel Filtresi */}
@@ -3794,84 +3927,54 @@ function Sozluk({ onBack, currentTheme, cycleTheme, favorites, favoriteVerbs, to
             
             {/* Seviye Filtresi */}
             <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' }}>
-              <button onClick={() => { setLevelFilter('all'); setLessonFilter('all'); }} style={{ padding: '6px 14px', background: levelFilter === 'all' ? theme.accent : 'transparent', color: levelFilter === 'all' ? '#fff' : theme.text, border: `1px solid ${levelFilter === 'all' ? theme.accent : theme.cardBorder}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, transition: 'all 0.3s ease' }}>Tümü</button>
-              <button onClick={() => { setLevelFilter('A1'); setLessonFilter('all'); }} style={{ padding: '6px 14px', background: levelFilter === 'A1' ? '#22c55e' : 'rgba(34,197,94,0.15)', color: levelFilter === 'A1' ? '#fff' : '#4ade80', border: `1px solid ${levelFilter === 'A1' ? '#22c55e' : '#22c55e50'}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, transition: 'all 0.3s ease' }}>A1 (1-9)</button>
-              <button onClick={() => { setLevelFilter('A2'); setLessonFilter('all'); }} style={{ padding: '6px 14px', background: levelFilter === 'A2' ? '#3b82f6' : 'rgba(59,130,246,0.15)', color: levelFilter === 'A2' ? '#fff' : '#60a5fa', border: `1px solid ${levelFilter === 'A2' ? '#3b82f6' : '#3b82f650'}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, transition: 'all 0.3s ease' }}>A2 (10-18)</button>
-              <button onClick={() => { setLevelFilter('B1'); setLessonFilter('all'); }} style={{ padding: '6px 14px', background: levelFilter === 'B1' ? '#a855f7' : 'rgba(168,85,247,0.15)', color: levelFilter === 'B1' ? '#fff' : '#c084fc', border: `1px solid ${levelFilter === 'B1' ? '#a855f7' : '#a855f750'}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, transition: 'all 0.3s ease' }}>B1 (19-29)</button>
+              {[
+                { level: 'all', label: 'Tümü', color: theme.accent },
+                { level: 'A1', label: 'A1 (1-9)', color: '#22c55e' },
+                { level: 'A2', label: 'A2 (10-18)', color: '#3b82f6' },
+                { level: 'B1', label: 'B1 (19-29)', color: '#a855f7' }
+              ].map(l => (
+                <button key={l.level} onClick={() => setLevelFilter(l.level)} style={{ 
+                  padding: '6px 14px', 
+                  background: levelFilter === l.level ? l.color : `${l.color}20`, 
+                  color: levelFilter === l.level ? '#fff' : l.color, 
+                  border: `1px solid ${l.color}`, 
+                  borderRadius: '8px', 
+                  cursor: 'pointer', 
+                  fontSize: '0.75rem', 
+                  fontWeight: 600 
+                }}>{l.label}</button>
+              ))}
             </div>
 
-            {/* Ders Seçimi - Yatay Scroll Çubuğu */}
+            {/* Çoklu Ders Seçimi */}
             <div style={{ marginTop: '8px' }}>
-              <div style={{ fontSize: '0.7rem', color: theme.textMuted, marginBottom: '8px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                📚 Ders Seçimi 
-                <span style={{ fontSize: '0.6rem', opacity: 0.6 }}>← kaydır →</span>
+              <div style={{ fontSize: '0.7rem', color: theme.textMuted, marginBottom: '8px', fontWeight: 600 }}>
+                📚 Ders Seçimi ({selectedLessons.size === 0 ? 'Tümü' : `${selectedLessons.size} ders`})
               </div>
-              <div style={{ 
-                display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '8px',
-                scrollbarWidth: 'thin', scrollbarColor: `${theme.accent} transparent`,
-                WebkitOverflowScrolling: 'touch'
-              }}>
-                <button 
-                  onClick={() => setLessonFilter('all')} 
-                  style={{ 
-                    padding: '10px 16px', borderRadius: '20px', cursor: 'pointer', 
-                    fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap',
-                    background: lessonFilter === 'all' ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : `${theme.accent}15`,
-                    color: lessonFilter === 'all' ? '#fff' : theme.accent,
-                    border: lessonFilter === 'all' ? 'none' : `1px solid ${theme.accent}30`,
-                    boxShadow: lessonFilter === 'all' ? '0 4px 15px rgba(99,102,241,0.5)' : 'none',
-                    transform: lessonFilter === 'all' ? 'scale(1.05)' : 'scale(1)',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                    flexShrink: 0
-                  }}
-                >
-                  ✨ Tümü
-                </button>
-                {lessons
-                  .filter(l => {
-                    const lessonNum = parseInt(l.replace('Lektion ', ''));
-                    if (levelFilter === 'A1') return lessonNum <= 9;
-                    if (levelFilter === 'A2') return lessonNum >= 10 && lessonNum <= 18;
-                    if (levelFilter === 'B1') return lessonNum >= 19;
-                    return true;
-                  })
-                  .map((l, idx) => {
-                  const lessonNum = parseInt(l.replace('Lektion ', ''));
-                  const isA1 = lessonNum <= 9;
-                  const isA2 = lessonNum >= 10 && lessonNum <= 18;
-                  const isB1 = lessonNum >= 19;
-                  const levelGradient = isA1 ? 'linear-gradient(135deg, #22c55e, #16a34a)' : isA2 ? 'linear-gradient(135deg, #3b82f6, #2563eb)' : 'linear-gradient(135deg, #a855f7, #7c3aed)';
-                  const levelBg = isA1 ? 'rgba(34,197,94,0.1)' : isA2 ? 'rgba(59,130,246,0.1)' : 'rgba(168,85,247,0.1)';
-                  const levelColor = isA1 ? '#4ade80' : isA2 ? '#60a5fa' : '#c084fc';
-                  const levelBorder = isA1 ? '#22c55e40' : isA2 ? '#3b82f640' : '#a855f740';
-                  const levelShadow = isA1 ? 'rgba(34,197,94,0.5)' : isA2 ? 'rgba(59,130,246,0.5)' : 'rgba(168,85,247,0.5)';
-                  const levelBgCircle = isA1 ? 'rgba(34,197,94,0.2)' : isA2 ? 'rgba(59,130,246,0.2)' : 'rgba(168,85,247,0.2)';
-                  const nounCount = allNouns.filter(n => n.lesson === l).length;
-                  const isSelected = lessonFilter === l;
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                <button onClick={selectAllLessons} style={{ 
+                  padding: '6px 12px', 
+                  borderRadius: '12px', 
+                  cursor: 'pointer',
+                  fontSize: '0.7rem', 
+                  fontWeight: 700,
+                  background: allLessonsSelected || selectedLessons.size === 0 ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : `${theme.accent}20`,
+                  color: allLessonsSelected || selectedLessons.size === 0 ? '#fff' : theme.accent,
+                  border: allLessonsSelected || selectedLessons.size === 0 ? 'none' : `1px solid ${theme.accent}50`,
+                  boxShadow: allLessonsSelected || selectedLessons.size === 0 ? '0 2px 8px rgba(99,102,241,0.4)' : 'none'
+                }}>✨ Tümü</button>
+                {lessons.filter(l => {
+                  const num = parseInt(l.replace('Lektion ', ''));
+                  if (levelFilter === 'A1') return num <= 9;
+                  if (levelFilter === 'A2') return num >= 10 && num <= 18;
+                  if (levelFilter === 'B1') return num >= 19;
+                  return true;
+                }).map(l => {
+                  const num = parseInt(l.replace('Lektion ', ''));
+                  const isSelected = selectedLessons.has(l);
                   return (
-                    <button 
-                      key={l}
-                      onClick={() => setLessonFilter(l)}
-                      style={{ 
-                        padding: '10px 14px', borderRadius: '20px', cursor: 'pointer',
-                        fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap',
-                        background: isSelected ? levelGradient : levelBg,
-                        color: isSelected ? '#fff' : levelColor,
-                        border: isSelected ? 'none' : `1px solid ${levelBorder}`,
-                        boxShadow: isSelected ? `0 4px 15px ${levelShadow}` : 'none',
-                        transform: isSelected ? 'scale(1.05)' : 'scale(1)',
-                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                        flexShrink: 0,
-                        display: 'flex', alignItems: 'center', gap: '6px'
-                      }}
-                    >
-                      <span style={{ 
-                        width: '22px', height: '22px', borderRadius: '50%', 
-                        background: isSelected ? 'rgba(255,255,255,0.25)' : levelBgCircle,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: '0.7rem', fontWeight: 800
-                      }}>{lessonNum}</span>
-                      <span style={{ fontSize: '0.6rem', opacity: 0.85 }}>{nounCount} sözcük</span>
+                    <button key={l} onClick={() => toggleLesson(l)} style={getLessonStyle(l, isSelected)}>
+                      {num}
                     </button>
                   );
                 })}
@@ -3880,295 +3983,198 @@ function Sozluk({ onBack, currentTheme, cycleTheme, favorites, favoriteVerbs, to
           </div>
         )}
 
-        {/* Ders Filtresi - Fiiller için */}
+        {/* Filtreler - Fiiller */}
         {activeTab === 'fiiller' && (
           <div style={{ marginBottom: '12px', padding: '12px', background: theme.card, borderRadius: '12px', border: `1px solid ${theme.cardBorder}` }}>
-            <div style={{ fontSize: '0.7rem', color: theme.textMuted, marginBottom: '8px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              📚 Ders Seçimi
-              <span style={{ fontSize: '0.6rem', opacity: 0.6 }}>← kaydır →</span>
+            {/* Seviye Filtresi */}
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' }}>
+              {[
+                { level: 'all', label: 'Tümü', color: theme.accent },
+                { level: 'A1', label: 'A1 (1-9)', color: '#22c55e' },
+                { level: 'A2', label: 'A2 (10-18)', color: '#3b82f6' },
+                { level: 'B1', label: 'B1 (19-29)', color: '#a855f7' }
+              ].map(l => (
+                <button key={l.level} onClick={() => setLevelFilter(l.level)} style={{ 
+                  padding: '6px 14px', 
+                  background: levelFilter === l.level ? l.color : `${l.color}20`, 
+                  color: levelFilter === l.level ? '#fff' : l.color, 
+                  border: `1px solid ${l.color}`, 
+                  borderRadius: '8px', 
+                  cursor: 'pointer', 
+                  fontSize: '0.75rem', 
+                  fontWeight: 600 
+                }}>{l.label}</button>
+              ))}
             </div>
-            <div style={{ 
-              display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '8px',
-              scrollbarWidth: 'thin', scrollbarColor: '#a855f7 transparent',
-              WebkitOverflowScrolling: 'touch'
-            }}>
-              <button 
-                onClick={() => setLessonFilter('all')} 
-                style={{ 
-                  padding: '10px 16px', borderRadius: '20px', cursor: 'pointer', 
-                  fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap',
-                  background: lessonFilter === 'all' ? 'linear-gradient(135deg, #a855f7, #9333ea)' : 'rgba(168,85,247,0.15)',
-                  color: lessonFilter === 'all' ? '#fff' : '#c084fc',
-                  border: lessonFilter === 'all' ? 'none' : '1px solid rgba(168,85,247,0.3)',
-                  boxShadow: lessonFilter === 'all' ? '0 4px 15px rgba(168,85,247,0.5)' : 'none',
-                  transform: lessonFilter === 'all' ? 'scale(1.05)' : 'scale(1)',
-                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  flexShrink: 0
-                }}
-              >
-                ✨ Tümü
-              </button>
-              {Array.from(new Set(allVerbs.map(v => v.lesson))).sort((a, b) => {
-                const numA = parseInt(a.replace('Lektion ', ''));
-                const numB = parseInt(b.replace('Lektion ', ''));
-                return numA - numB;
-              }).map((l, idx) => {
-                const lessonNum = parseInt(l.replace('Lektion ', ''));
-                const verbCount = allVerbs.filter(v => v.lesson === l).length;
-                const isSelected = lessonFilter === l;
-                const levelColor = lessonNum <= 9 ? '#22c55e' : lessonNum <= 18 ? '#3b82f6' : '#a855f7';
-                return (
-                  <button 
-                    key={l}
-                    onClick={() => setLessonFilter(l)}
-                    style={{ 
-                      padding: '10px 14px', borderRadius: '20px', cursor: 'pointer',
-                      fontSize: '0.75rem', fontWeight: 700, whiteSpace: 'nowrap',
-                      background: isSelected 
-                        ? `linear-gradient(135deg, ${levelColor}, ${levelColor}dd)`
-                        : `${levelColor}15`,
-                      color: isSelected ? '#fff' : levelColor,
-                      border: isSelected ? 'none' : `1px solid ${levelColor}50`,
-                      boxShadow: isSelected ? `0 4px 15px ${levelColor}80` : 'none',
-                      transform: isSelected ? 'scale(1.05)' : 'scale(1)',
-                      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                      flexShrink: 0,
-                      display: 'flex', alignItems: 'center', gap: '6px'
-                    }}
-                  >
-                    <span style={{ 
-                      width: '22px', height: '22px', borderRadius: '50%', 
-                      background: isSelected ? 'rgba(255,255,255,0.25)' : `${levelColor}30`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '0.7rem', fontWeight: 800
-                    }}>{lessonNum}</span>
-                    <span style={{ fontSize: '0.6rem', opacity: 0.85 }}>{verbCount} fiil</span>
-                  </button>
-                );
-              })}
+
+            {/* Çoklu Ders Seçimi */}
+            <div style={{ marginTop: '8px' }}>
+              <div style={{ fontSize: '0.7rem', color: theme.textMuted, marginBottom: '8px', fontWeight: 600 }}>
+                📚 Ders Seçimi ({selectedLessons.size === 0 ? 'Tümü' : `${selectedLessons.size} ders`})
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                <button onClick={selectAllLessons} style={{ 
+                  padding: '6px 12px', 
+                  borderRadius: '12px', 
+                  cursor: 'pointer',
+                  fontSize: '0.7rem', 
+                  fontWeight: 700,
+                  background: allLessonsSelected || selectedLessons.size === 0 ? 'linear-gradient(135deg, #a855f7, #7c3aed)' : 'rgba(168,85,247,0.2)',
+                  color: allLessonsSelected || selectedLessons.size === 0 ? '#fff' : '#a855f7',
+                  border: allLessonsSelected || selectedLessons.size === 0 ? 'none' : '1px solid rgba(168,85,247,0.5)',
+                  boxShadow: allLessonsSelected || selectedLessons.size === 0 ? '0 2px 8px rgba(168,85,247,0.4)' : 'none'
+                }}>✨ Tümü</button>
+                {verbLessons.filter(l => {
+                  const num = parseInt(l.replace('Lektion ', ''));
+                  if (levelFilter === 'A1') return num <= 9;
+                  if (levelFilter === 'A2') return num >= 10 && num <= 18;
+                  if (levelFilter === 'B1') return num >= 19;
+                  return true;
+                }).map(l => {
+                  const num = parseInt(l.replace('Lektion ', ''));
+                  const isSelected = selectedLessons.has(l);
+                  return (
+                    <button key={l} onClick={() => toggleLesson(l)} style={getLessonStyle(l, isSelected)}>
+                      {num}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}
 
         {/* Sonuç Sayısı */}
         <div style={{ marginBottom: '8px', padding: '8px 12px', background: `${theme.accent}15`, borderRadius: '8px', fontSize: '0.75rem', color: theme.accent, fontWeight: 600 }}>
-          {activeTab === 'isimler' 
-            ? `${filteredNouns.length} isim bulundu`
-            : `${filteredVerbs.length} fiil bulundu`
-          }
+          {activeTab === 'isimler' && `${filteredNouns.length} isim bulundu`}
+          {activeTab === 'fiiller' && `${filteredVerbs.length} fiil bulundu`}
+          {activeTab === 'favoriler' && `${favorites.length} isim, ${favoriteVerbs.length} fiil favori`}
         </div>
 
         {/* Liste */}
-        <div style={{ maxHeight: '55vh', overflowY: 'auto', borderRadius: '12px' }}>
-          {activeTab === 'isimler' ? (
-            // İsimler Listesi
-            filteredNouns.map((noun, index) => (
-              <div key={index} style={{ 
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '12px', marginBottom: '6px',
-                background: theme.card, borderRadius: '10px',
-                border: `1px solid ${isFavorite(noun.noun) ? '#f59e0b' : theme.cardBorder}`
-              }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <span style={{ 
-                      padding: '3px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700,
-                      background: theme[noun.article.toLowerCase()].bg,
-                      color: theme[noun.article.toLowerCase()].text,
-                      border: `1px solid ${theme[noun.article.toLowerCase()].border}`
-                    }}>{noun.article}</span>
-                    <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{noun.noun}</span>
-                    <span style={{ 
-                      padding: '2px 6px', borderRadius: '4px', fontSize: '0.6rem', fontWeight: 600,
-                      background: noun.level === 'A1' ? 'rgba(34,197,94,0.2)' : 'rgba(59,130,246,0.2)',
-                      color: noun.level === 'A1' ? '#4ade80' : '#60a5fa'
-                    }}>{noun.level}</span>
-                  </div>
-                  <div style={{ fontSize: '0.8rem', color: theme.textMuted, marginBottom: '2px' }}>🇹🇷 {noun.translation}</div>
-                  {noun.plural && (
-                    noun.plural === '❌' 
-                      ? <div style={{ fontSize: '0.7rem', color: '#e74c3c' }}>❌ Çoğul hali yok</div>
-                      : <div style={{ fontSize: '0.7rem', color: '#e67e22' }}>📝 Plural: {noun.plural}</div>
-                  )}
-                  <div style={{ fontSize: '0.65rem', color: theme.textMuted, opacity: 0.7, marginTop: '2px' }}>📚 {noun.lesson}</div>
+        <div style={{ maxHeight: '50vh', overflowY: 'auto', borderRadius: '12px' }}>
+          {activeTab === 'isimler' && visibleNouns.map((noun, index) => (
+            <div key={`${noun.noun}-${index}`} style={{ 
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '12px', marginBottom: '6px',
+              background: theme.card, borderRadius: '10px',
+              border: `1px solid ${isFavorite(noun.noun) ? '#f59e0b' : theme.cardBorder}`
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
+                  <span style={{ 
+                    padding: '3px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700,
+                    background: theme[noun.article.toLowerCase()].bg,
+                    color: theme[noun.article.toLowerCase()].text,
+                    border: `1px solid ${theme[noun.article.toLowerCase()].border}`
+                  }}>{noun.article}</span>
+                  <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{noun.noun}</span>
+                  <span style={{ 
+                    padding: '2px 6px', borderRadius: '4px', fontSize: '0.6rem', fontWeight: 600,
+                    background: noun.level === 'A1' ? 'rgba(34,197,94,0.2)' : noun.level === 'A2' ? 'rgba(59,130,246,0.2)' : 'rgba(168,85,247,0.2)',
+                    color: noun.level === 'A1' ? '#4ade80' : noun.level === 'A2' ? '#60a5fa' : '#c084fc'
+                  }}>{noun.level}</span>
                 </div>
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  <button onClick={() => toggleFavorite(noun)} style={{ 
-                    padding: '8px 10px', 
-                    background: isFavorite(noun.noun) ? 'rgba(245,158,11,0.3)' : 'transparent', 
-                    color: isFavorite(noun.noun) ? '#f59e0b' : theme.textMuted, 
-                    border: `1px solid ${isFavorite(noun.noun) ? '#f59e0b' : theme.cardBorder}`, 
-                    borderRadius: '8px', cursor: 'pointer', fontSize: '1rem',
-                    transition: 'all 0.2s ease'
-                  }}>{isFavorite(noun.noun) ? '⭐' : '☆'}</button>
-                  <button onClick={() => speakWord(noun.noun)} style={{ padding: '8px 12px', background: `${theme.accent}20`, color: theme.accent, border: `1px solid ${theme.accent}`, borderRadius: '8px', cursor: 'pointer', fontSize: '1rem' }}>🔊</button>
-                </div>
+                <div style={{ fontSize: '0.8rem', color: theme.textMuted, marginBottom: '2px' }}>🇹🇷 {noun.translation}</div>
+                {noun.plural && (noun.plural === '❌' 
+                  ? <div style={{ fontSize: '0.7rem', color: '#e74c3c' }}>❌ Çoğul yok</div>
+                  : <div style={{ fontSize: '0.7rem', color: '#e67e22' }}>📝 {noun.plural}</div>
+                )}
+                <div style={{ fontSize: '0.65rem', color: theme.textMuted, opacity: 0.7, marginTop: '2px' }}>📚 {noun.lesson}</div>
               </div>
-            ))
-          ) : activeTab === 'fiiller' ? (
-            // Fiiller Listesi
-            filteredVerbs.map((verb, index) => {
-              const lessonNum = parseInt(verb.lesson.replace('Lektion ', ''));
-              const level = lessonNum <= 9 ? 'A1' : lessonNum <= 18 ? 'A2' : 'B1';
-              const levelColor = level === 'A1' ? '#22c55e' : level === 'A2' ? '#3b82f6' : '#a855f7';
-              return (
-              <div key={index} style={{ 
-                padding: '14px', marginBottom: '8px',
-                background: theme.card, borderRadius: '12px',
-                border: `1px solid ${isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.cardBorder}`
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, flexWrap: 'wrap' }}>
-                    <span style={{ 
-                      fontWeight: 800, color: '#c084fc', fontSize: '1.05rem',
-                      textShadow: '0 0 20px rgba(168,85,247,0.3)'
-                    }}>{verb.verb}</span>
-                    <span style={{ 
-                      padding: '3px 8px', borderRadius: '6px', fontSize: '0.6rem', fontWeight: 600,
-                      background: 'rgba(168,85,247,0.15)', color: '#a855f7',
-                      border: '1px solid rgba(168,85,247,0.3)'
-                    }}>{verb.lesson}</span>
-                    <span style={{ 
-                      padding: '2px 6px', borderRadius: '4px', fontSize: '0.55rem', fontWeight: 700,
-                      background: `${levelColor}25`, color: levelColor,
-                      border: `1px solid ${levelColor}50`
-                    }}>{level}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button onClick={() => toggleFavoriteVerb(verb)} style={{ 
-                      padding: '8px 10px', 
-                      background: isFavoriteVerb(verb.verb) ? 'rgba(245,158,11,0.3)' : 'transparent', 
-                      color: isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.textMuted, 
-                      border: `1px solid ${isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.cardBorder}`, 
-                      borderRadius: '8px', cursor: 'pointer', fontSize: '1rem',
-                      transition: 'all 0.2s ease'
-                    }}>{isFavoriteVerb(verb.verb) ? '⭐' : '☆'}</button>
-                    <button onClick={() => speakWord(verb.verb)} style={{ 
-                      padding: '8px 12px', background: 'rgba(168, 85, 247, 0.2)', 
-                      color: '#c084fc', border: '1px solid #a855f7', borderRadius: '10px', 
-                      cursor: 'pointer', fontSize: '1rem',
-                      transition: 'all 0.2s ease'
-                    }}>🔊</button>
-                  </div>
-                </div>
-                
-                {/* Çeviri */}
-                <div style={{ marginTop: '8px' }}>
-                  <span style={{
-                    padding: '6px 14px', borderRadius: '20px', fontSize: '0.8rem', fontWeight: 600,
-                    background: 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(139,92,246,0.2))',
-                    color: '#e879f9',
-                    border: '1px solid rgba(168,85,247,0.3)',
-                    boxShadow: '0 2px 8px rgba(168,85,247,0.15)',
-                    display: 'inline-block'
-                  }}>
-                    {verb.tr[0]}
-                  </span>
-                </div>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button onClick={() => toggleFavorite(noun)} style={{ 
+                  padding: '8px 10px', 
+                  background: isFavorite(noun.noun) ? 'rgba(245,158,11,0.3)' : 'transparent', 
+                  color: isFavorite(noun.noun) ? '#f59e0b' : theme.textMuted, 
+                  border: `1px solid ${isFavorite(noun.noun) ? '#f59e0b' : theme.cardBorder}`, 
+                  borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' 
+                }}>{isFavorite(noun.noun) ? '⭐' : '☆'}</button>
+                <button onClick={() => speakWord(`${noun.article} ${noun.noun}`)} style={{ 
+                  padding: '8px 10px', background: 'transparent', color: theme.accent, 
+                  border: `1px solid ${theme.cardBorder}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' 
+                }}>🔊</button>
               </div>
-            );})
-          ) : (
-            // Favoriler Listesi
-            <div>
-              {/* Alt Tab: İsimler/Fiiller */}
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                <button onClick={() => setFavSubTab('isimler')} style={{
-                  flex: 1, padding: '8px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem',
-                  background: favSubTab === 'isimler' ? 'rgba(245,158,11,0.3)' : theme.card,
-                  color: favSubTab === 'isimler' ? '#f59e0b' : theme.textMuted,
-                  border: `1px solid ${favSubTab === 'isimler' ? '#f59e0b' : theme.cardBorder}`
-                }}>📝 İsimler ({favorites.length})</button>
-                <button onClick={() => setFavSubTab('fiiller')} style={{
-                  flex: 1, padding: '8px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem',
-                  background: favSubTab === 'fiiller' ? 'rgba(245,158,11,0.3)' : theme.card,
-                  color: favSubTab === 'fiiller' ? '#f59e0b' : theme.textMuted,
-                  border: `1px solid ${favSubTab === 'fiiller' ? '#f59e0b' : theme.cardBorder}`
-                }}>🔤 Fiiller ({favoriteVerbs.length})</button>
-              </div>
-
-              {favorites.length === 0 && favoriteVerbs.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '40px 20px', color: theme.textMuted }}>
-                  <div style={{ fontSize: '3rem', marginBottom: '12px' }}>⭐</div>
-                  <div style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '8px' }}>Henüz favori yok</div>
-                  <div style={{ fontSize: '0.75rem' }}>Sözlükten kelime veya fiilleri favorilere ekle</div>
-                </div>
-              ) : favSubTab === 'isimler' ? (
-                favorites.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '30px', color: theme.textMuted }}>
-                    <div style={{ fontSize: '0.85rem' }}>Favori isim yok</div>
-                  </div>
-                ) : favorites.map((noun, index) => (
-                  <div key={index} style={{ 
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '12px', marginBottom: '6px',
-                    background: theme.card, borderRadius: '10px',
-                    border: `1px solid #f59e0b`
-                  }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                        <span style={{ 
-                          padding: '3px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700,
-                          background: theme[noun.article.toLowerCase()].bg,
-                          color: theme[noun.article.toLowerCase()].text
-                        }}>{noun.article}</span>
-                        <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{noun.noun}</span>
-                      </div>
-                      <div style={{ fontSize: '0.8rem', color: theme.textMuted }}>🇹🇷 {noun.translation}</div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '6px' }}>
-                      <button onClick={() => toggleFavorite(noun)} style={{ 
-                        padding: '8px 10px', background: 'rgba(245,158,11,0.3)', color: '#f59e0b', 
-                        border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', fontSize: '1rem'
-                      }}>⭐</button>
-                      <button onClick={() => speakWord(noun.noun)} style={{ 
-                        padding: '8px 12px', background: `${theme.accent}20`, color: theme.accent, 
-                        border: `1px solid ${theme.accent}`, borderRadius: '8px', cursor: 'pointer', fontSize: '1rem' 
-                      }}>🔊</button>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                favoriteVerbs.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '30px', color: theme.textMuted }}>
-                    <div style={{ fontSize: '0.85rem' }}>Favori fiil yok</div>
-                  </div>
-                ) : favoriteVerbs.map((verb, index) => (
-                  <div key={index} style={{ 
-                    padding: '14px', marginBottom: '8px',
-                    background: theme.card, borderRadius: '12px',
-                    border: '1px solid #f59e0b'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span style={{ fontWeight: 800, color: '#c084fc', fontSize: '1.05rem' }}>{verb.verb}</span>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button onClick={() => toggleFavoriteVerb(verb)} style={{ 
-                          padding: '8px 10px', background: 'rgba(245,158,11,0.3)', color: '#f59e0b', 
-                          border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', fontSize: '1rem'
-                        }}>⭐</button>
-                        <button onClick={() => speakWord(verb.verb)} style={{ 
-                          padding: '8px 12px', background: 'rgba(168,85,247,0.2)', color: '#c084fc', 
-                          border: '1px solid #a855f7', borderRadius: '10px', cursor: 'pointer', fontSize: '1rem'
-                        }}>🔊</button>
-                      </div>
-                    </div>
-                    <div style={{ marginTop: '8px' }}>
-                      <span style={{
-                        padding: '6px 14px', borderRadius: '20px', fontSize: '0.8rem', fontWeight: 600,
-                        background: 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(139,92,246,0.2))',
-                        color: '#e879f9', border: '1px solid rgba(168,85,247,0.3)', display: 'inline-block'
-                      }}>{verb.tr[0]}</span>
-                    </div>
-                  </div>
-                ))
-              )}
             </div>
+          ))}
+
+          {activeTab === 'fiiller' && visibleVerbs.map((verb, index) => (
+            <div key={`${verb.verb}-${index}`} style={{ 
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '12px', marginBottom: '6px',
+              background: theme.card, borderRadius: '10px',
+              border: `1px solid ${isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.cardBorder}`
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{verb.verb}</span>
+                  <span style={{ 
+                    padding: '2px 6px', borderRadius: '4px', fontSize: '0.6rem', fontWeight: 600,
+                    background: parseInt(verb.lesson.replace('Lektion ', '')) <= 9 ? 'rgba(34,197,94,0.2)' : parseInt(verb.lesson.replace('Lektion ', '')) <= 18 ? 'rgba(59,130,246,0.2)' : 'rgba(168,85,247,0.2)',
+                    color: parseInt(verb.lesson.replace('Lektion ', '')) <= 9 ? '#4ade80' : parseInt(verb.lesson.replace('Lektion ', '')) <= 18 ? '#60a5fa' : '#c084fc'
+                  }}>{verb.lesson}</span>
+                </div>
+                <div style={{ fontSize: '0.8rem', color: theme.textMuted }}>🇹🇷 {verb.tr[0]}</div>
+              </div>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button onClick={() => toggleFavoriteVerb(verb)} style={{ 
+                  padding: '8px 10px', 
+                  background: isFavoriteVerb(verb.verb) ? 'rgba(245,158,11,0.3)' : 'transparent', 
+                  color: isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.textMuted, 
+                  border: `1px solid ${isFavoriteVerb(verb.verb) ? '#f59e0b' : theme.cardBorder}`, 
+                  borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' 
+                }}>{isFavoriteVerb(verb.verb) ? '⭐' : '☆'}</button>
+                <button onClick={() => speakWord(verb.verb)} style={{ 
+                  padding: '8px 10px', background: 'transparent', color: theme.accent, 
+                  border: `1px solid ${theme.cardBorder}`, borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' 
+                }}>🔊</button>
+              </div>
+            </div>
+          ))}
+
+          {activeTab === 'favoriler' && (
+            <>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
+                <button onClick={() => setFavSubTab('isimler')} style={{ flex: 1, padding: '8px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem', background: favSubTab === 'isimler' ? '#10b981' : theme.card, color: favSubTab === 'isimler' ? '#fff' : theme.text, border: `1px solid ${theme.cardBorder}` }}>İsimler ({favorites.length})</button>
+                <button onClick={() => setFavSubTab('fiiller')} style={{ flex: 1, padding: '8px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem', background: favSubTab === 'fiiller' ? '#a855f7' : theme.card, color: favSubTab === 'fiiller' ? '#fff' : theme.text, border: `1px solid ${theme.cardBorder}` }}>Fiiller ({favoriteVerbs.length})</button>
+              </div>
+              {favSubTab === 'isimler' && favorites.filter(f => searchTerm === '' || f.noun.toLowerCase().includes(searchTerm.toLowerCase())).map((noun, index) => (
+                <div key={index} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', marginBottom: '6px', background: theme.card, borderRadius: '10px', border: `1px solid #f59e0b` }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ padding: '3px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700, background: theme[noun.article.toLowerCase()].bg, color: theme[noun.article.toLowerCase()].text }}>{noun.article}</span>
+                      <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{noun.noun}</span>
+                    </div>
+                    <div style={{ fontSize: '0.8rem', color: theme.textMuted }}>🇹🇷 {noun.translation}</div>
+                  </div>
+                  <button onClick={() => toggleFavorite(noun)} style={{ padding: '8px 10px', background: 'rgba(245,158,11,0.3)', color: '#f59e0b', border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' }}>⭐</button>
+                </div>
+              ))}
+              {favSubTab === 'fiiller' && favoriteVerbs.filter(f => searchTerm === '' || f.verb.toLowerCase().includes(searchTerm.toLowerCase())).map((verb, index) => (
+                <div key={index} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', marginBottom: '6px', background: theme.card, borderRadius: '10px', border: `1px solid #f59e0b` }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.95rem' }}>{verb.verb}</span>
+                    <div style={{ fontSize: '0.8rem', color: theme.textMuted }}>🇹🇷 {verb.tr[0]}</div>
+                  </div>
+                  <button onClick={() => toggleFavoriteVerb(verb)} style={{ padding: '8px 10px', background: 'rgba(245,158,11,0.3)', color: '#f59e0b', border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' }}>⭐</button>
+                </div>
+              ))}
+            </>
           )}
         </div>
 
-        {/* Footer */}
-        <div style={{ textAlign: 'center', marginTop: '12px', color: theme.textMuted, fontSize: '0.7rem' }}>
-          📖 Sözlük • A1-A2 Seviye
-        </div>
+        {/* Daha Fazla Yükle Butonu */}
+        {activeTab === 'isimler' && visibleCount < filteredNouns.length && (
+          <button onClick={loadMore} style={{ width: '100%', padding: '12px', marginTop: '10px', background: theme.accent, color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>
+            Daha Fazla Yükle ({visibleCount}/{filteredNouns.length})
+          </button>
+        )}
+        {activeTab === 'fiiller' && visibleCount < filteredVerbs.length && (
+          <button onClick={loadMore} style={{ width: '100%', padding: '12px', marginTop: '10px', background: '#a855f7', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>
+            Daha Fazla Yükle ({visibleCount}/{filteredVerbs.length})
+          </button>
+        )}
+
       </div>
     </div>
   );
